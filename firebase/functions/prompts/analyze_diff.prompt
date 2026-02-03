@@ -1,0 +1,53 @@
+---
+model: googleai/gemini-2.0-flash
+input:
+  schema:
+    diff: string
+    filename: string
+    language: string
+output:
+  schema: AnalyzerIssues
+  format: json
+---
+Analyze this git diff for security vulnerabilities, bugs, and style issues.
+
+**File:** {{filename}}
+**Language:** {{language}}
+
+```diff
+{{diff}}
+```
+
+IMPORTANT RULES:
+1. ONLY analyze lines that are ADDED (lines starting with `+`)
+2. Ignore removed lines (starting with `-`) - they're being deleted
+3. Ignore context lines (no prefix) - they're unchanged
+4. Line numbers should reference the NEW file (after the change)
+5. Focus on issues INTRODUCED by this change
+
+Look for:
+**Security:**
+- SQL injection, XSS, command injection
+- Hardcoded secrets/credentials
+- Insecure deserialization
+
+**Bugs:**
+- Null/undefined errors
+- Off-by-one errors
+- Resource leaks
+- Logic errors
+
+**Style:**
+- Missing error handling
+- Poor naming
+- Missing documentation for public APIs
+
+For each issue found in ADDED lines:
+- `line`: The line number in the NEW file
+- `title`: Brief description
+- `severity`: "critical" for security, "warning" for bugs, "info" for style
+- `category`: "security", "bug", or "style"
+- `explanation`: Why this is a problem
+- `suggestion`: How to fix it
+
+If the diff looks safe and well-written, return an empty issues list.
