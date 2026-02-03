@@ -1,0 +1,30 @@
+---
+model: googleai/gemini-2.0-flash
+input:
+  schema:
+    code: string
+    language: string
+output:
+  schema: AnalyzerIssues
+  format: json
+---
+Analyze this {{language}} code for BUGS and LOGIC ERRORS ONLY.
+
+```{{language}}
+{{code}}
+```
+
+Look for:
+- Null/None dereferences
+- Off-by-one errors
+- Resource leaks
+- Race conditions
+- Incorrect error handling
+- Logic flaws
+- Unhandled exceptions
+
+IMPORTANT:
+- Only report BUGS. Do not report security issues, style, or documentation issues.
+- Include the exact line number where the issue occurs.
+- All issues must have category: "bug"
+- If the code is correct, return an empty issues list.

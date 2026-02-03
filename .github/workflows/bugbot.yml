@@ -1,0 +1,73 @@
+name: BugBot PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.py' '*.js' '*.ts' | head -20)
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Review PR diffs
+        if: steps.changed.outputs.files != ''
+        env:
+          BUGBOT_URL: ${{ vars.BUGBOT_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -z "$BUGBOT_URL" ] && { echo "BUGBOT_URL not set"; exit 1; }
+          
+          COMMENT_FILE=$(mktemp)
+          HAS_ISSUES=false
+          HAS_CRITICAL=false
+          
+          for file in ${{ steps.changed.outputs.files }}; do
+            echo "Reviewing $file..."
+            DIFF=$(git diff origin/${{ github.base_ref }}...HEAD -- "$file")
+            [ -z "$DIFF" ] && continue
+            
+            case "$file" in *.py) LANG="python";; *) LANG="javascript";; esac
+            
+            RESPONSE=$(curl -s -X POST "$BUGBOT_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg diff "$DIFF" --arg filename "$file" --arg lang "$LANG" \
+                   '{diff: $diff, filename: $filename, language: $lang}')" \
+              --max-time 120)
+            
+            [ -z "$RESPONSE" ] && continue
+            
+            VERDICT=$(echo "$RESPONSE" | jq -r '.verdict // "error"')
+            [ "$VERDICT" = "request_changes" ] && HAS_CRITICAL=true
+            
+            if [ "$VERDICT" != "approve" ] && [ "$VERDICT" != "error" ]; then
+              HAS_ISSUES=true
+              echo "" >> $COMMENT_FILE
+              echo "### $file" >> $COMMENT_FILE
+              echo "$(echo "$RESPONSE" | jq -r '.summary')" >> $COMMENT_FILE
+              echo "" >> $COMMENT_FILE
+              echo "$RESPONSE" | jq -r '.issues[] | "- **[\(.severity)]** Line \(.line): \(.title)\n  > \(.suggestion)"' >> $COMMENT_FILE 2>/dev/null
+            fi
+          done
+          
+          if [ "$HAS_ISSUES" = true ]; then
+            [ "$HAS_CRITICAL" = true ] && HEADER="## 🚨 BugBot Found Critical Issues" || HEADER="## ⚠️ BugBot Suggestions"
+            { echo "$HEADER"; echo ""; cat $COMMENT_FILE; echo ""; echo "---"; echo "*Powered by Genkit*"; } > ${COMMENT_FILE}.final
+            gh pr comment ${{ github.event.pull_request.number }} --body-file ${COMMENT_FILE}.final
+          fi
+          rm -f $COMMENT_FILE ${COMMENT_FILE}.final

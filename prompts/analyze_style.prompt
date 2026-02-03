@@ -1,0 +1,29 @@
+---
+model: googleai/gemini-2.0-flash
+input:
+  schema:
+    code: string
+    language: string
+output:
+  schema: AnalyzerIssues
+  format: json
+---
+Analyze this {{language}} code for STYLE and READABILITY ONLY.
+
+```{{language}}
+{{code}}
+```
+
+Look for:
+- Poor naming
+- Missing docstrings
+- Overly complex functions
+- Magic numbers
+- Code duplication
+
+IMPORTANT:
+- Only report STYLE issues. Do not report security issues or bugs.
+- Include the exact line number where the issue occurs.
+- All issues must have category: "style"
+- Be pragmatic. Minor nits are "info" severity.
+- If the code is clean, return an empty issues list.
