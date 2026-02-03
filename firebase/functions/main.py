@@ -1,144 +1,35 @@
-"""BugBot Firebase Functions.
+"""BugBot Firebase Function.
 
-Deploy:
-    firebase functions:secrets:set GEMINI_API_KEY
-    firebase deploy --only functions
+This is deployed at: https://us-central1-aim-testing.cloudfunctions.net/review_pr
+
+Note: This uses the released genkit package. For the typed output features,
+see src/main.py which requires the development version.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
-from typing import Any, Literal
+import re
+from typing import Any
 
 from firebase_admin import initialize_app
 from firebase_functions import https_fn, options
 from firebase_functions.params import SecretParam
-from pydantic import BaseModel, Field
 
-from genkit import Genkit, Output
-from genkit.plugins.google_genai import GoogleAI
-
-# Initialize Firebase
 initialize_app()
-
-# Secret stored in Firebase
 GEMINI_API_KEY = SecretParam('GEMINI_API_KEY')
-
-# Prompts directory (relative to this file)
-PROMPTS_DIR = Path(__file__).parent / 'prompts'
-
-
-# =============================================================================
-# Types
-# =============================================================================
-
-
-class Issue(BaseModel):
-    """A code issue found by the analyzer."""
-
-    line: int = Field(description='Line number')
-    title: str = Field(description='Brief title')
-    severity: Literal['critical', 'warning', 'info']
-    category: Literal['security', 'bug', 'style']
-    explanation: str = Field(description='Why this is a problem')
-    suggestion: str = Field(description='How to fix it')
-
-
-class Analysis(BaseModel):
-    """Analysis result containing issues."""
-
-    issues: list[Issue] = Field(default_factory=list)
-
-
-class ReviewResult(BaseModel):
-    """Complete review result."""
-
-    filename: str
-    summary: str
-    issues: list[dict[str, Any]]
-    verdict: Literal['approve', 'request_changes', 'needs_discussion']
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-
-def create_genkit(api_key: str) -> Genkit:
-    """Create a configured Genkit instance."""
-    return Genkit(
-        plugins=[GoogleAI(api_key=api_key)],
-        model='googleai/gemini-2.0-flash',
-        prompt_dir=PROMPTS_DIR,
-    )
 
 
 def json_response(data: dict[str, Any], status: int = 200) -> https_fn.Response:
-    """Create a JSON response with CORS headers."""
     return https_fn.Response(
         response=json.dumps(data),
         status=status,
         headers={
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type',
         },
     )
-
-
-def handle_cors(request: https_fn.Request) -> https_fn.Response | None:
-    """Handle CORS preflight requests."""
-    if request.method == 'OPTIONS':
-        return https_fn.Response(
-            response='',
-            status=204,
-            headers={
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type',
-                'Access-Control-Max-Age': '3600',
-            },
-        )
-    return None
-
-
-def create_summary(issues: list[dict[str, Any]]) -> tuple[str, str]:
-    """Create summary and verdict from issues."""
-    if not issues:
-        return 'LGTM! No issues found.', 'approve'
-
-    counts = {'security': 0, 'bug': 0, 'style': 0}
-    has_critical = False
-    has_warning = False
-
-    for issue in issues:
-        category = issue.get('category', 'style')
-        severity = issue.get('severity', 'info')
-        if category in counts:
-            counts[category] += 1
-        if severity == 'critical':
-            has_critical = True
-        elif severity == 'warning':
-            has_warning = True
-
-    summary = f"Found {len(issues)} issue(s): {counts['security']} security, {counts['bug']} bugs, {counts['style']} style"
-
-    if has_critical:
-        verdict = 'request_changes'
-    elif has_warning:
-        verdict = 'needs_discussion'
-    else:
-        verdict = 'approve'
-
-    return summary, verdict
-
-
-# =============================================================================
-# Cloud Function
-# =============================================================================
 
 
 @https_fn.on_request(
@@ -147,53 +38,80 @@ def create_summary(issues: list[dict[str, Any]]) -> tuple[str, str]:
     secrets=[GEMINI_API_KEY],
 )
 def review_pr(request: https_fn.Request) -> https_fn.Response:
-    """Review a git diff for security, bugs, and style issues.
+    """Review a git diff for security, bugs, and style issues."""
+    if request.method == 'OPTIONS':
+        return https_fn.Response('', status=204, headers={
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'POST',
+            'Access-Control-Allow-Headers': 'Content-Type',
+        })
 
-    POST /review_pr
-    Body: {"diff": "...", "filename": "...", "language": "python"}
-
-    Returns: {"filename", "summary", "issues", "verdict"}
-    """
-    # Handle CORS preflight
-    if cors_response := handle_cors(request):
-        return cors_response
-
-    # Require POST
     if request.method != 'POST':
-        return json_response({'error': 'POST method required'}, status=405)
+        return json_response({'error': 'POST required'}, 405)
 
-    # Parse request
-    try:
-        body: dict[str, Any] = request.get_json(silent=True) or {}
-    except Exception:
-        return json_response({'error': 'Invalid JSON'}, status=400)
-
+    body: dict[str, Any] = request.get_json(silent=True) or {}
     diff = str(body.get('diff', ''))
     filename = str(body.get('filename', 'unknown'))
     language = str(body.get('language', 'python'))
 
     if not diff:
-        return json_response({'error': 'diff is required'}, status=400)
+        return json_response({'error': 'diff required'}, 400)
 
-    # Analyze the diff
     try:
-        ai = create_genkit(GEMINI_API_KEY.value)
+        from genkit.ai import Genkit
+        from genkit.plugins.google_genai import GoogleAI
 
-        # Register schema for dotprompt
-        ai.define_schema('Analysis', Analysis)
+        ai = Genkit(
+            plugins=[GoogleAI(api_key=GEMINI_API_KEY.value)],
+            model='googleai/gemini-2.0-flash',
+        )
 
-        async def analyze_diff() -> Analysis:
-            prompt = ai.prompt('analyze_diff', output=Output(schema=Analysis))
-            response = await prompt(input={
-                'diff': diff,
-                'filename': filename,
-                'language': language,
-            })
-            return response.output
+        async def analyze() -> dict[str, Any]:
+            response = await ai.generate(prompt=f'''Analyze this git diff for security vulnerabilities, bugs, and style issues.
 
-        result = asyncio.run(analyze_diff())
-        issues = [issue.model_dump() for issue in result.issues]
-        summary, verdict = create_summary(issues)
+**File:** {filename}
+**Language:** {language}
+
+```diff
+{diff}
+```
+
+RULES:
+1. Only analyze ADDED lines (starting with +)
+2. Return JSON: {{"issues": [{{line, title, severity, category, explanation, suggestion}}]}}
+3. severity: "critical" | "warning" | "info"
+4. category: "security" | "bug" | "style"
+5. If safe, return {{"issues": []}}''')
+
+            match = re.search(r'\{[\s\S]*\}', response.text)
+            if match:
+                return json.loads(match.group())
+            return {'issues': []}
+
+        result = asyncio.run(analyze())
+        issues = result.get('issues', [])
+
+        # Determine verdict
+        has_critical = any(i.get('severity') == 'critical' for i in issues)
+        has_warning = any(i.get('severity') == 'warning' for i in issues)
+
+        if has_critical:
+            verdict = 'request_changes'
+        elif has_warning:
+            verdict = 'needs_discussion'
+        else:
+            verdict = 'approve'
+
+        # Summary
+        if not issues:
+            summary = 'LGTM!'
+        else:
+            c = {'security': 0, 'bug': 0, 'style': 0}
+            for i in issues:
+                cat = i.get('category', 'style')
+                if cat in c:
+                    c[cat] += 1
+            summary = f"Found {len(issues)}: {c['security']} security, {c['bug']} bugs, {c['style']} style"
 
         return json_response({
             'filename': filename,
@@ -203,4 +121,4 @@ def review_pr(request: https_fn.Request) -> https_fn.Response:
         })
 
     except Exception as e:
-        return json_response({'error': str(e)}, status=500)
+        return json_response({'error': str(e)}, 500)

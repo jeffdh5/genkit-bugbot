@@ -2,66 +2,66 @@
 
 AI code reviewer that comments on PRs with security issues, bugs, and style problems.
 
-Built with [Google Genkit](https://github.com/firebase/genkit).
+Built with [Google Genkit](https://github.com/firebase/genkit) - showcasing **typed outputs**.
 
-## How it works
+## The Key Feature: Typed Outputs
 
-1. GitHub Action triggers on PR
-2. Sends diff to BugBot API
-3. AI analyzes only changed lines
-4. Posts comment with issues found
+```python
+# Define your schema
+class Analysis(BaseModel):
+    issues: list[Issue]
+
+# Get a typed prompt
+prompt = ai.prompt('analyze_diff', output=Output(schema=Analysis))
+
+# Execute it
+response = await prompt(input={'code': code})
+
+# response.output is a real Analysis instance, not a dict!
+for issue in response.output.issues:  # <- Full IDE autocomplete!
+    print(issue.title)  # <- Type checked!
+```
+
+**Before:** `response.output` was `Any` - no autocomplete, no type checking  
+**After:** `response.output` is your actual Pydantic model with full typing!
 
 ## Quick Start
 
-### Deploy
-
 ```bash
-cd firebase
-firebase login
-firebase functions:secrets:set GEMINI_API_KEY
-firebase deploy --only functions
-```
+# Install genkit (dev version with typed outputs)
+pip install -e /path/to/genkit/py/packages/genkit
 
-### Add to any repo
-
-1. Copy `.github/workflows/bugbot.yml` to your repo
-2. Add repo variable: `BUGBOT_URL` = your deployed function URL
-3. Open a PR and watch BugBot review it!
-
-## Local Development
-
-```bash
-pip install -r requirements.txt
+# Run
 genkit start -- python src/main.py
 ```
 
 Try it:
 ```bash
-# Review code
-curl localhost:8080/review -d '{"code": "password = \"admin123\""}'
-
-# Review a diff
-curl localhost:8080/review-pr -d '{"diff": "+API_KEY = \"secret\"", "filename": "config.py"}'
+curl localhost:8080/review -d '{"code": "API_KEY = \"secret123\""}'
 ```
 
-Open http://localhost:4000 to see traces.
+## How It Works
+
+1. Define Pydantic models for your output schema
+2. Use `ai.prompt('name', output=Output(schema=YourModel))`
+3. `response.output` is now fully typed - both statically AND at runtime!
+
+## GitHub Actions Integration
+
+BugBot can automatically review PRs. See `.github/workflows/bugbot.yml`.
+
+The deployed function is at: `https://us-central1-aim-testing.cloudfunctions.net/review_pr`
 
 ## API
 
 **POST /review-pr**
-
 ```json
-{
-  "diff": "@@ -1,3 +1,5 @@\n+API_KEY = \"secret123\"",
-  "filename": "config.py",
-  "language": "python"
-}
+{"diff": "+API_KEY = \"secret\"", "filename": "config.py", "language": "python"}
 ```
 
-Response:
+**Response:**
 ```json
 {
-  "filename": "config.py",
   "summary": "Found 1 issue(s): 1 security, 0 bugs, 0 style",
   "issues": [{
     "line": 1,
